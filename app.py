@@ -10,7 +10,6 @@ from queue import Empty, Queue
 from typing import Any
 
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
@@ -418,15 +417,21 @@ def render_conflicts(data: dict[str, Any]) -> None:
         )
 
 
+COMPANY_CHART_COLORS = ("#2563eb", "#0f8a83", "#b7791f", "#a85578")
+
+
+def company_chart_color(index: int) -> str:
+    return COMPANY_CHART_COLORS[index % len(COMPANY_CHART_COLORS)]
+
+
 def render_radar(data: dict[str, Any]) -> None:
     labels = list(score_labels().values())
-    colors = ["#2563eb", "#0f8a83", "#b7791f", "#a85578"]
     figure = go.Figure()
     for index, company in enumerate(data.get("companies", [])):
         values = [float(company.get("scores", {}).get(key, 0)) for key in CRITERIA]
         figure.add_trace(go.Scatterpolar(
             r=values + [values[0]], theta=labels + [labels[0]], fill="toself", opacity=.55,
-            name=company.get("name", "Bilinmiyor"), line_color=colors[index % len(colors)],
+            name=company.get("name", "Bilinmiyor"), line_color=company_chart_color(index),
         ))
     figure.update_layout(
         polar={"radialaxis":{"visible":True,"range":[0,10],"tickfont":{"size":10}}},
@@ -439,15 +444,16 @@ def render_radar(data: dict[str, Any]) -> None:
 
 
 def render_bar(data: dict[str, Any]) -> None:
-    frame = benchmark_dataframe(data).sort_values("Genel puan")
-    figure = px.bar(
-        frame, x="Genel puan", y="Şirket", orientation="h", text="Genel puan", color="Genel puan",
-        labels={"Genel puan": ui("Genel puan", "Overall score"), "Şirket": ui("Şirket", "Company")},
-        color_continuous_scale=["#bfdbfe", "#2563eb"], range_x=[0,10],
-    )
-    figure.update_traces(textposition="outside")
+    frame = benchmark_dataframe(data)
+    frame["chart_color"] = [company_chart_color(index) for index in range(len(frame))]
+    frame = frame.sort_values("Genel puan")
+    figure = go.Figure(go.Bar(
+        x=frame["Genel puan"], y=frame["Şirket"], orientation="h",
+        text=frame["Genel puan"], textposition="outside",
+        marker_color=frame["chart_color"],
+    ))
     figure.update_layout(
-        coloraxis_showscale=False, xaxis_title=ui("Ağırlıklı puan / 10", "Weighted score / 10"), yaxis_title="", height=390,
+        xaxis_range=[0, 10], xaxis_title=ui("Ağırlıklı puan / 10", "Weighted score / 10"), yaxis_title="", height=390,
         template="simple_white", font={"color":"#172033"},
         margin={"l":20,"r":35,"t":25,"b":30}, paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
