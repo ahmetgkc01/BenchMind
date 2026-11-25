@@ -230,10 +230,10 @@ def findings_dataframe(data: dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def export_csv(data: dict[str, Any]) -> bytes:
+def export_csv(data: dict[str, Any], columns: dict[str, str] | None = None) -> bytes:
     benchmark = benchmark_dataframe(data).copy()
     benchmark.insert(0, "Araştırma tarihi", data.get("research_date", "Bilinmiyor"))
-    return benchmark.to_csv(index=False).encode("utf-8-sig")
+    return benchmark.rename(columns=columns or {}).to_csv(index=False).encode("utf-8-sig")
 
 
 def compact_context(data: dict[str, Any]) -> str:

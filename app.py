@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import html
+import json
 import time
+from copy import deepcopy
+from pathlib import Path
 from concurrent.futures import Future, ThreadPoolExecutor
 from queue import Empty, Queue
 from typing import Any
@@ -13,6 +16,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from api_client import (
+    translate_backend,
     BenchMindAPIError,
     api_base_url,
     ask_backend,
@@ -29,6 +33,7 @@ from benchmark_data import (
     load_demo_data,
 )
 from openai_service import (
+    translate_english,
     LIVE_RESEARCH_MAX_SEARCHES,
     clean_company_inputs,
     company_name_from_url,
@@ -55,6 +60,32 @@ from research_cache import (
 
 
 APP_RELEASE = "2026.11.03-accessible-color-system-v2"
+
+
+def ui(tr: str, en: str) -> str:
+    return en if st.session_state.get("ui_language") == "en" else tr
+
+
+def set_ui_language(language: str) -> None:
+    st.session_state.ui_language = language
+
+
+def score_labels() -> dict[str, str]:
+    english = [
+        "Pricing and value", "Recording and platform support", "Transcription and languages",
+        "AI summaries and action items", "Integrations and automation",
+        "Team, administration and security", "Customer feedback",
+    ]
+    return {label: ui(label, en) for (label, _), en in zip(CRITERIA.values(), english, strict=True)}
+
+
+def research_mode_label() -> str:
+    mode = st.session_state.research_mode
+    english_labels = {
+        "Demo snapshot'ı": "Demo snapshot",
+        "Kayıtlı Live Research": "Saved Live Research",
+    }
+    return ui(mode, english_labels.get(mode, mode))
 
 
 def escape_markdown_dollars(value: Any) -> str:
@@ -105,6 +136,9 @@ st.markdown(
     .eyebrow,.section-kicker{color:#1d4ed8;font-size:.74rem;font-weight:800;letter-spacing:.13em}
     .hero h1{color:var(--ink);font-size:2.5rem;line-height:1.08;margin:.55rem 0}
     .hero p{color:var(--muted);font-size:1.05rem;max-width:800px;margin:0}
+    :is(.st-key-language_tr,.st-key-language_en) button p::before{content:"";display:inline-block;width:1.25em;height:.85em;margin-right:.4em;vertical-align:-.05em;background-size:100% 100%;border-radius:2px;box-shadow:0 0 0 1px rgba(0,0,0,.15)}
+    .st-key-language_tr button p::before{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 20'%3E%3Cpath fill='%23e30a17' d='M0 0h30v20H0z'/%3E%3Ccircle cx='10' cy='10' r='5' fill='white'/%3E%3Ccircle cx='11.3' cy='10' r='4' fill='%23e30a17'/%3E%3Cpath fill='white' d='m14 10 4.5-1.5-2.7 3.9V7.6l2.7 3.9z'/%3E%3C/svg%3E")}
+    .st-key-language_en button p::before{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 20'%3E%3Cpath fill='%23012169' d='M0 0h30v20H0z'/%3E%3Cpath stroke='white' stroke-width='4' d='m0 0 30 20m0-20L0 20'/%3E%3Cpath stroke='%23c8102e' stroke-width='1.4' d='m0 0 30 20m0-20L0 20'/%3E%3Cpath stroke='white' stroke-width='6' d='M0 10h30M15 0v20'/%3E%3Cpath stroke='%23c8102e' stroke-width='3.3' d='M0 10h30M15 0v20'/%3E%3C/svg%3E")}
     .status-line{display:flex;gap:.55rem;flex-wrap:wrap;margin-top:1.2rem}
     .status-pill{border:1px solid #9684bd;border-radius:999px;padding:.35rem .7rem;color:#332159;background:rgba(247,246,251,.72);font-size:.78rem;font-weight:700}
     .company-input-title{display:flex;align-items:center;gap:.5rem;font-size:.76rem;font-weight:850;letter-spacing:.08em;margin:.05rem 0 .55rem;text-transform:uppercase}
@@ -298,14 +332,17 @@ def render_rag_status_panel() -> None:
             f"Kalıcı Chroma collection: {rag_stats.get('collection_name', '')}{cache_note}"
         )
     elif rag_stats.get("status") == "indexing":
-        st.info("Benchmark hazır. Kaynaklar arka planda Vector RAG index'ine alınıyor.")
+        st.info(ui("Benchmark hazır. Kaynaklar arka planda Vector RAG index'ine alınıyor.", "The benchmark is ready. Sources are being indexed in the background."))
         events = st.session_state.get("rag_events", [])
         for event in events[-8:]:
             st.caption(f"{event.get('time', '')} · {event.get('message', '')}")
     elif rag_stats.get("status") == "failed":
-        st.error(f"Araştırma tamamlandı ancak Vector RAG index oluşturulamadı: {rag_stats.get('error', 'Bilinmeyen hata')}")
+        st.error(f"{ui('Araştırma tamamlandı ancak Vector RAG index oluşturulamadı', 'Research completed, but the vector index could not be built')}: {rag_stats.get('error', ui('Bilinmeyen hata', 'Unknown error'))}")
     else:
-        st.info("Demo snapshot'ı Vector RAG olarak indekslenmez. Gerçek web document, chunk ve embedding metrikleri Live Research sonrasında burada gösterilir.")
+        st.info(ui(
+            "Demo snapshot'ı Vector RAG olarak indekslenmez. Gerçek web document, chunk ve embedding metrikleri Live Research sonrasında burada gösterilir.",
+            "The demo snapshot has no vector index. Live Research displays indexed documents, chunks, and embeddings here.",
+        ))
 
 
 @st.fragment(run_every=1.0)
@@ -358,7 +395,7 @@ def badge(label: str) -> str:
         "Medium": "Orta",
         "Low": "Düşük",
     }.get(label, label)
-    return f'<span class="tag {css}">{html.escape(display_label)}</span>'
+    return f'<span class="tag {css}">{html.escape(ui(display_label, label))}</span>'
 
 
 def links(ids: list[str], data: dict[str, Any], as_html: bool = False) -> str:
@@ -370,19 +407,19 @@ def links(ids: list[str], data: dict[str, Any], as_html: bool = False) -> str:
         ]
     else:
         output = [f"[{item_id}]({lookup[item_id]['url']})" for item_id in ids if item_id in lookup]
-    return " · ".join(output) if output else "Bağlantılı kaynak yok"
+    return " · ".join(output) if output else ui("Bağlantılı kaynak yok", "No linked sources")
 
 
 def render_conflicts(data: dict[str, Any]) -> None:
     for conflict in data.get("conflicts", []):
         st.warning(
-            f"**Çelişkili kanıt — {conflict.get('topic', 'Belirtilmemiş')}**\n\n"
-            f"{conflict.get('description', '')}\n\nKaynaklar: {links(conflict.get('source_ids', []), data)}"
+            f"**{ui('Çelişkili kanıt', 'Conflicting evidence')} — {conflict.get('topic', ui('Belirtilmemiş', 'Unspecified'))}**\n\n"
+            f"{conflict.get('description', '')}\n\n{ui('Kaynaklar', 'Sources')}: {links(conflict.get('source_ids', []), data)}"
         )
 
 
 def render_radar(data: dict[str, Any]) -> None:
-    labels = [label for label, _ in CRITERIA.values()]
+    labels = list(score_labels().values())
     colors = ["#2563eb", "#0f8a83", "#b7791f", "#a85578"]
     figure = go.Figure()
     for index, company in enumerate(data.get("companies", [])):
@@ -405,11 +442,12 @@ def render_bar(data: dict[str, Any]) -> None:
     frame = benchmark_dataframe(data).sort_values("Genel puan")
     figure = px.bar(
         frame, x="Genel puan", y="Şirket", orientation="h", text="Genel puan", color="Genel puan",
+        labels={"Genel puan": ui("Genel puan", "Overall score"), "Şirket": ui("Şirket", "Company")},
         color_continuous_scale=["#bfdbfe", "#2563eb"], range_x=[0,10],
     )
     figure.update_traces(textposition="outside")
     figure.update_layout(
-        coloraxis_showscale=False, xaxis_title="Ağırlıklı puan / 10", yaxis_title="", height=390,
+        coloraxis_showscale=False, xaxis_title=ui("Ağırlıklı puan / 10", "Weighted score / 10"), yaxis_title="", height=390,
         template="simple_white", font={"color":"#172033"},
         margin={"l":20,"r":35,"t":25,"b":30}, paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
@@ -419,13 +457,13 @@ def render_bar(data: dict[str, Any]) -> None:
 
 def render_benchmark_table(data: dict[str, Any]) -> None:
     headers = [
-        ("Şirket", "10%"),
-        ("Fiyatlandırma", "17%"),
-        ("Ücretsiz plan", "18%"),
-        ("Hedef müşteri", "17%"),
-        ("Temel güçlü yön", "16%"),
-        ("Temel sınırlama", "16%"),
-        ("Genel puan", "6%"),
+        (ui("Şirket", "Company"), "10%"),
+        (ui("Fiyatlandırma", "Pricing"), "17%"),
+        (ui("Ücretsiz plan", "Free plan"), "18%"),
+        (ui("Hedef müşteri", "Target customer"), "17%"),
+        (ui("Temel güçlü yön", "Key strength"), "16%"),
+        (ui("Temel sınırlama", "Key limitation"), "16%"),
+        (ui("Genel puan", "Overall score"), "6%"),
     ]
     header_html = "".join(
         f'<th style="width:{width}">{html.escape(label)}</th>' for label, width in headers
@@ -460,16 +498,16 @@ def render_benchmark_table(data: dict[str, Any]) -> None:
 
 def render_evidence_table(frame: pd.DataFrame, data: dict[str, Any]) -> None:
     if frame.empty:
-        st.info("Seçilen filtrelerle eşleşen kanıt bulunamadı.")
+        st.info(ui("Seçilen filtrelerle eşleşen kanıt bulunamadı.", "No evidence matches the selected filters."))
         return
     headers = [
-        ("Şirket", "9%"),
-        ("Kategori", "10%"),
-        ("Kanıt türü", "13%"),
-        ("Bulgu", "30%"),
-        ("Kaynak ID'leri", "7%"),
-        ("Kaynak URL'leri", "23%"),
-        ("Araştırma tarihi", "8%"),
+        (ui("Şirket", "Company"), "9%"),
+        (ui("Kategori", "Category"), "10%"),
+        (ui("Kanıt türü", "Evidence type"), "13%"),
+        (ui("Bulgu", "Finding"), "30%"),
+        (ui("Kaynak ID'leri", "Source IDs"), "7%"),
+        (ui("Kaynak URL'leri", "Source URLs"), "23%"),
+        (ui("Araştırma tarihi", "Research date"), "8%"),
     ]
     header_html = "".join(
         f'<th style="width:{width}">{html.escape(label)}</th>' for label, width in headers
@@ -510,8 +548,8 @@ def render_evidence_table(frame: pd.DataFrame, data: dict[str, Any]) -> None:
 
 
 def render_swot(data: dict[str, Any]) -> None:
-    labels = {"strengths":("Güçlü yönler","↗"), "weaknesses":("Zayıf yönler","↘"),
-              "opportunities":("Fırsatlar","◎"), "threats":("Tehditler","△")}
+    labels = {"strengths":(ui("Güçlü yönler", "Strengths"),"↗"), "weaknesses":(ui("Zayıf yönler", "Weaknesses"),"↘"),
+              "opportunities":(ui("Fırsatlar", "Opportunities"),"◎"), "threats":(ui("Tehditler", "Threats"),"△")}
     panels = []
     for key, (title, symbol) in labels.items():
         items = []
@@ -532,9 +570,9 @@ def render_recommendations(data: dict[str, Any]) -> None:
     items = data.get("recommendations", [])
     cards = [
         f'<article class="card recommendation interactive-card">{badge(item.get("priority","Medium"))}{badge("AI inference")}'
-        f'<h4>{html.escape(item.get("title","Öneri"))}</h4>'
+        f'<h4>{html.escape(item.get("title",ui("Öneri", "Recommendation")))}</h4>'
         f'<p>{html.escape(item.get("statement",""))}</p>'
-        f'<div class="small" style="margin-top:.6rem">Kanıt: {links(item.get("source_ids",[]),data,as_html=True)}</div></article>'
+        f'<div class="small" style="margin-top:.6rem">{ui("Kanıt", "Evidence")}: {links(item.get("source_ids",[]),data,as_html=True)}</div></article>'
         for item in items
     ]
     st.markdown(f'<div class="recommendation-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
@@ -552,10 +590,13 @@ def ask(
         st.markdown(question)
     retrieved_chunks: list[dict[str, Any]] = []
     if not api_key:
-        answer = "API erişimi yapılandırılmamış. `ANTHROPIC_API_KEY` veya `OPENAI_API_KEY` değerini ekleyin."
+        answer = ui(
+            "API erişimi yapılandırılmamış. `ANTHROPIC_API_KEY` veya `OPENAI_API_KEY` değerini ekleyin.",
+            "Configure a model provider to ask questions about this benchmark.",
+        )
     elif api_base_url():
         try:
-            with st.spinner("FastAPI kanıt paketini kontrol ediyor..."):
+            with st.spinner(ui("FastAPI kanıt paketini kontrol ediyor...", "Checking evidence through FastAPI…")):
                 response = ask_backend(
                     question,
                     data,
@@ -572,7 +613,7 @@ def ask(
                 st.error(answer)
     else:
         try:
-            with st.spinner("Kanıt paketi kontrol ediliyor..."):
+            with st.spinner(ui("Kanıt paketi kontrol ediliyor...", "Checking evidence…")):
                 rag_stats = st.session_state.get("rag_stats", {})
                 if rag_stats.get("status") == "ready":
                     retrieved_chunks = query_research_index(
@@ -673,7 +714,7 @@ def render_remote_benchmark_job() -> None:
     try:
         completed = refresh_remote_benchmark_job()
     except BenchMindAPIError as exc:
-        st.error(f"FastAPI job durumu alınamadı: {exc}")
+        st.error(f"{ui('FastAPI job durumu alınamadı', 'Could not retrieve the FastAPI job status')}: {exc}")
         return
     if completed:
         st.rerun(scope="app")
@@ -716,6 +757,7 @@ def sync_company_url_from_name(index: int, default_name: str, default_url: str) 
 
 
 init_state()
+st.session_state.setdefault("ui_language", "tr")
 refresh_rag_index_job()
 backend_enabled = bool(api_base_url())
 backend_error = ""
@@ -735,18 +777,19 @@ else:
 
 with st.sidebar:
     st.markdown("## BenchMind AI")
-    st.caption("Görünür kanıt sınırlarıyla competitive intelligence.")
-    st.caption(f"Sürüm: `{APP_RELEASE}`")
+    st.caption(ui("Görünür kanıt sınırlarıyla competitive intelligence.", "Competitive intelligence with clear evidence limits."))
+    st.caption(f"{ui('Sürüm', 'Version')}: `{APP_RELEASE}`")
     st.divider()
     st.markdown("**Workspace**")
-    st.caption(f"Mod: {st.session_state.research_mode}")
+    st.caption(f"{ui('Mod', 'Mode')}: {research_mode_label()}")
     api_label = f"FastAPI · {provider}" if backend_enabled and provider else provider
-    st.caption(f"API: {api_label + ' bağlı' if api_key and api_label else 'Yapılandırılmamış'}")
+    api_status = f"{api_label} {ui('bağlı', 'connected')}" if api_key and api_label else ui("Yapılandırılmamış", "Not configured")
+    st.caption(f"API: {api_status}")
     if backend_error:
-        st.error(f"FastAPI bağlantısı kurulamadı: {backend_error}")
+        st.error(f"{ui('FastAPI bağlantısı kurulamadı', 'Unable to connect to FastAPI')}: {backend_error}")
     rag_stats = st.session_state.rag_stats
-    rag_label = {"ready": "Hazır", "indexing": "Hazırlanıyor"}.get(
-        rag_stats.get("status"), "İndekslenmedi"
+    rag_label = {"ready": ui("Hazır", "Ready"), "indexing": ui("Hazırlanıyor", "Indexing")}.get(
+        rag_stats.get("status"), ui("İndekslenmedi", "Not indexed")
     )
     st.caption(
         f"Vector RAG: {rag_label} · {rag_stats.get('documents', 0)} document · "
@@ -754,10 +797,10 @@ with st.sidebar:
     )
     default_model = default_model_for_provider(provider)
     model_name = st.text_input(
-        f"{provider or 'LLM'} model'i",
+        f"{provider or 'LLM'} {ui('model’i', 'model')}",
         default_model,
         key=f"llm_model_{(provider or 'none').lower()}",
-        help="ANTHROPIC_MODEL veya OPENAI_MODEL ile de ayarlanabilir.",
+        help=ui("ANTHROPIC_MODEL veya OPENAI_MODEL ile de ayarlanabilir.", "You can also set this with ANTHROPIC_MODEL or OPENAI_MODEL."),
     )
     if provider == "Claude Code":
         st.caption("Live Research Claude Code WebSearch kullanır ve çalışma başına varsayılan $1 bütçe sınırına sahiptir.")
@@ -771,25 +814,93 @@ with st.sidebar:
             "Live Research Gemini Google Search grounding kullanır; ücret seçili Google AI projesine yansır."
         )
     st.divider()
-    st.markdown("**Kanıt politikası**")
-    st.caption("Resmî ürün sayfaları → resmî dokümantasyon → review platform'ları → topluluk yorumları")
+    st.markdown(ui("**Kanıt politikası**", "**Evidence policy**"))
+    st.caption(ui("Resmî ürün sayfaları → resmî dokümantasyon → review platform'ları → topluluk yorumları", "Official product pages → official documentation → review platforms → community feedback"))
     st.markdown(f"{badge('Verified fact')} {badge('Customer opinion')} {badge('AI inference')}", unsafe_allow_html=True)
     st.divider()
-    st.caption("Portföy MVP'si · Yalnızca herkese açık bilgiler")
+    st.caption(ui("Portföy MVP'si · Yalnızca herkese açık bilgiler", "Portfolio MVP · Public information only"))
 
-data = st.session_state.research
+@st.cache_data
+def demo_english_translations() -> dict[str, str]:
+    path = Path(__file__).resolve().parent / "data" / "demo_english.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def english_results(data, messages):
+    fields = {
+        "industry", "executive_summary", "pricing", "free_plan", "target_customer",
+        "key_strength", "key_limitation", "statement", "topic", "description",
+        "title", "explanation", "content", "category",
+    }
+    slots = []
+
+    def collect(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in fields and isinstance(item, str) and item.strip():
+                    slots.append((value, key, item))
+                else:
+                    collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    data, messages = deepcopy((data, messages))
+    collect(data)
+    collect(messages)
+    cache = st.session_state.setdefault("english_translations", {})
+    cache.update(demo_english_translations())
+    missing = list(dict.fromkeys(source for _, _, source in slots if source not in cache))
+    if missing and api_key:
+        try:
+            with st.spinner("Translating results into English…"):
+                for start in range(0, len(missing), 15):
+                    batch = missing[start:start + 15]
+                    translated = (
+                        translate_backend(batch, model_name) if backend_enabled
+                        else translate_english(batch, api_key, model_name, provider or "OpenAI")
+                    )
+                    cache.update(zip(batch, translated, strict=True))
+        except Exception:
+            st.warning("Some results could not be translated. Retry to translate the remaining text.")
+            st.button("Retry translation", key="retry_translation")
+    elif missing:
+        st.warning("Connect a model provider to translate the report and chat into English.")
+    for parent, key, source in slots:
+        parent[key] = cache.get(source, "English translation unavailable.")
+    return data, messages
+
+
+original_data = st.session_state.research
+data, displayed_chat = original_data, st.session_state.chat_history
+if st.session_state.ui_language == "en":
+    data, displayed_chat = english_results(data, displayed_chat)
+with st.container(horizontal=True, horizontal_alignment="right"):
+    for code, label in (("tr", "Türkçe"), ("en", "English")):
+        st.button(
+            label,
+            key=f"language_{code}",
+            help=ui("Arayüz dili", "Interface language"),
+            type="primary" if st.session_state.ui_language == code else "secondary",
+            on_click=set_ui_language,
+            args=(code,),
+        )
+hero_description = ui(
+    "Dağınık rakip verilerini kaynaklara dayalı ürün kararlarına dönüştürün. Konumlandırmayı, ürün özelliklerini, müşteri sinyallerini ve stratejik fırsatları tek bir çalışma alanında karşılaştırın.",
+    "Turn scattered competitor data into evidence-backed product decisions. Compare positioning, capabilities, customer feedback, and strategic opportunities in one workspace.",
+)
+unknown = ui("Bilinmiyor", "Unknown")
 st.markdown(
     f"""<div class="hero"><div class="eyebrow">COMPETITIVE PRODUCT INTELLIGENCE</div>
-    <h1>BenchMind AI</h1><p>Dağınık rakip verilerini kaynaklara dayalı ürün kararlarına dönüştürün. Positioning'i,
-    ürün yeteneklerini, müşteri sinyallerini ve stratejik fırsatları kanıt odaklı tek bir workspace'te karşılaştırın.</p>
-    <div class="status-line"><span class="status-pill">{html.escape(st.session_state.research_mode)}</span>
-    <span class="status-pill">Son araştırma: {html.escape(data.get('research_date','Bilinmiyor'))}</span>
-    <span class="status-pill">Sektör: {html.escape(data.get('industry','Bilinmiyor'))}</span></div></div>""",
+    <h1>BenchMind AI</h1><p>{hero_description}</p>
+    <div class="status-line"><span class="status-pill">{html.escape(research_mode_label())}</span>
+    <span class="status-pill">{ui('Son araştırma', 'Last research')}: {html.escape(data.get('research_date', unknown))}</span>
+    <span class="status-pill">{ui('Sektör', 'Industry')}: {html.escape(data.get('industry', unknown))}</span></div></div>""",
     unsafe_allow_html=True,
 )
 
-st.markdown('<div class="section-kicker">RESEARCH KURULUMU</div>', unsafe_allow_html=True)
-st.subheader("Bir hedef şirket ve en fazla üç rakip seçin")
+st.markdown(f'<div class="section-kicker">{ui("RESEARCH KURULUMU", "RESEARCH SETUP")}</div>', unsafe_allow_html=True)
+st.subheader(ui("Bir hedef şirket ve en fazla üç rakip seçin", "Choose one target company and up to three competitors"))
 defaults = [("Fathom","https://www.fathom.ai/"), ("Fireflies.ai","https://fireflies.ai/"),
             ("Otter.ai","https://otter.ai/"), ("MeetGeek","https://meetgeek.ai/")]
 resolved_widget_inputs = st.session_state.pop("resolved_company_inputs", None)
@@ -804,7 +915,7 @@ inputs = []
 for i, ((default_name, default_url), company_col) in enumerate(
     zip(defaults, company_columns, strict=False)
 ):
-    role = "Hedef şirket" if i == 0 else f"Rakip {i}"
+    role = ui("Hedef şirket", "Target company") if i == 0 else f"{ui('Rakip', 'Competitor')} {i}"
     name_key = f"name_{i}"
     url_key = f"url_{i}"
     st.session_state.setdefault(name_key, default_name)
@@ -816,18 +927,18 @@ for i, ((default_name, default_url), company_col) in enumerate(
                 unsafe_allow_html=True,
             )
             name = st.text_input(
-                "Şirket adı",
+                ui("Şirket adı", "Company name"),
                 key=name_key,
                 on_change=sync_company_url_from_name,
                 args=(i, default_name, default_url),
-                help="Şirket adı veya amazon.com.tr gibi bir domain girebilirsiniz.",
+                help=ui("Şirket adı veya amazon.com.tr gibi bir domain girebilirsiniz.", "Enter a company name or a domain such as amazon.com."),
             )
             url = st.text_input(
-                "Web sitesi (isteğe bağlı)",
+                ui("Web sitesi (isteğe bağlı)", "Website (optional)"),
                 key=url_key,
                 on_change=sync_company_name_from_url,
                 args=(i, default_name, default_url),
-                help="URL'yi değiştirdiğinizde varsayılan şirket adı otomatik olarak güncellenir.",
+                help=ui("URL'yi değiştirdiğinizde varsayılan şirket adı otomatik olarak güncellenir.", "Editing the URL automatically updates the default company name."),
             )
     inputs.append({"name":name, "website":url})
 
@@ -852,13 +963,13 @@ def saved_research_label(cache_key: str) -> str:
 
 left_button, cached_button, live_button, _ = st.columns([1,1.25,1.25,1.5])
 with left_button:
-    st.button("Demo'yu Yükle", width="stretch", on_click=load_demo_state)
+    st.button(ui("Demo'yu Yükle", "Load Demo"), key="load_demo", width="stretch", on_click=load_demo_state)
 with cached_button:
     cached_clicked = st.button(
-        "Kayıtlı Sonucu Getir",
+        ui("Kayıtlı Sonucu Getir", "Load Saved Result"),
         width="stretch",
         disabled=not saved_options,
-        help="Son üç Live Research sonucunu seçim penceresinde gösterir.",
+        help=ui("Son üç Live Research sonucunu seçim penceresinde gösterir.", "Choose from the three most recent Live Research results."),
     )
 with live_button:
     live_clicked = st.button(
@@ -885,9 +996,9 @@ def dismiss_saved_research_dialog() -> None:
     st.session_state.show_saved_research_dialog = False
 
 
-@st.dialog("Son 3 Live Research", on_dismiss=dismiss_saved_research_dialog)
+@st.dialog(ui("Son 3 Live Research", "Recent Live Research"), on_dismiss=dismiss_saved_research_dialog)
 def show_saved_research_dialog() -> None:
-    st.caption("Yüklemek istediğiniz araştırmayı seçin. Benchmark tablosu seçiminize göre yenilenir.")
+    st.caption(ui("Yüklemek istediğiniz araştırmayı seçin. Benchmark tablosu seçiminize göre yenilenir.", "Choose research to load. The benchmark table will update."))
     selected_saved_key = st.radio(
         "Kayıtlı araştırmalar",
         saved_options,
@@ -900,7 +1011,7 @@ def show_saved_research_dialog() -> None:
         f"Hedef: **{selected_entry.get('target_company', 'Bilinmiyor')}**"
         + (f" · Karşılaştırma: {selected_companies}" if selected_companies else "")
     )
-    if st.button("Seçili Kaydı Yükle", type="primary", width="stretch"):
+    if st.button(ui("Seçili Kaydı Yükle", "Load selected result"), type="primary", width="stretch"):
         result = selected_entry["research"]
         st.session_state.research = result
         st.session_state.research_mode = "Kayıtlı Live Research"
@@ -948,7 +1059,7 @@ if live_clicked:
         st.session_state.confirm_live_research = True
 
 
-@st.dialog("Live Research maliyet onayı")
+@st.dialog(ui("Live Research maliyet onayı", "Confirm Live Research cost"))
 def confirm_and_run_live_research() -> None:
     st.write(f"**Hedef şirket:** {resolved_inputs[0]['name']}")
     st.caption(
@@ -974,7 +1085,7 @@ def confirm_and_run_live_research() -> None:
     else:
         search_cost = cost_estimate.get("search_cost_usd")
         if search_cost is None:
-            st.warning("Bu model için maliyet tahmini bulunmuyor.")
+            st.warning(ui("Bu model için maliyet tahmini bulunmuyor.", "No cost estimate is available for this model."))
         else:
             st.warning(
                 "Bu modelin token fiyatı bilinmiyor. "
@@ -988,10 +1099,10 @@ def confirm_and_run_live_research() -> None:
         f"Fiyat tarihi: {cost_estimate['pricing_as_of']}."
     )
     approve, cancel = st.columns(2)
-    if cancel.button("Vazgeç", width="stretch"):
+    if cancel.button(ui("Vazgeç", "Cancel"), width="stretch"):
         st.session_state.confirm_live_research = False
         st.rerun()
-    if approve.button("Onayla ve araştır", type="primary", width="stretch"):
+    if approve.button(ui("Onayla ve araştır", "Confirm and research"), type="primary", width="stretch"):
         st.session_state.confirm_live_research = False
         if backend_enabled:
             try:
@@ -1006,7 +1117,7 @@ def confirm_and_run_live_research() -> None:
                 st.rerun()
             return
         try:
-            with st.spinner("Resmî sayfalar, dokümantasyon, fiyatlandırma ve müşteri sinyalleri araştırılıyor..."):
+            with st.spinner(ui("Resmî sayfalar, dokümantasyon, fiyatlandırma ve müşteri sinyalleri araştırılıyor...", "Researching official sites, documentation, pricing, and customer feedback…")):
                 result = research_companies(resolved_inputs, api_key, model_name, provider or "OpenAI")
         except Exception as exc:
             st.error(f"Live Research başarısız oldu: {exc}")
@@ -1030,7 +1141,11 @@ if st.session_state.confirm_live_research:
 
 render_remote_benchmark_job()
 
-data = st.session_state.research
+if original_data is not st.session_state.research:
+    original_data = st.session_state.research
+    data, displayed_chat = original_data, st.session_state.chat_history
+    if st.session_state.ui_language == "en":
+        data, displayed_chat = english_results(data, displayed_chat)
 companies = data.get("companies", [])
 leader = max(companies, key=lambda item:item.get("overall_score",0), default={})
 target = next((item for item in companies if item.get("name") == data.get("target_company")), companies[0] if companies else {})
@@ -1049,10 +1164,10 @@ if isinstance(active_saved, dict):
         "T", " "
     ).replace("+00:00", " UTC")
 st.info(
-    f"Aktif benchmark: **{data.get('target_company', 'Bilinmiyor')}**"
-    + (f" · Karşılaştırma: {active_names}" if active_names else "")
-    + (f" · Kayıt zamanı: {active_saved_at}" if active_saved_at else "")
-    + f" · Mod: {st.session_state.research_mode}"
+    f"{ui('Aktif benchmark', 'Active benchmark')}: **{data.get('target_company', unknown)}**"
+    + (f" · {ui('Karşılaştırma', 'Comparison')}: {active_names}" if active_names else "")
+    + (f" · {ui('Kayıt zamanı', 'Saved at')}: {active_saved_at}" if active_saved_at else "")
+    + f" · {ui('Mod', 'Mode')}: {research_mode_label()}"
 )
 
 if st.session_state.rag_stats.get("status") == "indexing":
@@ -1062,15 +1177,16 @@ else:
 
 st.divider()
 for column, (label, value, delta) in zip(st.columns(5), [
-    ("Karşılaştırılan ürün", len(companies), None), ("Hedef puanı", f"{target.get('overall_score',0):.2f}/10", None),
-    ("Kategori lideri", leader.get("name","Bilinmiyor"), f"{leader.get('overall_score',0):.2f}/10"),
-    ("Doğrulanmış bulgu", verified, f"{len(data.get('sources',[]))} kaynak"),
-    ("Kanıt güveni", f"{confidence.get('score', 0)}/100", confidence.get("level", "Düşük")),
+    (ui("Karşılaştırılan ürün", "Products compared"), len(companies), None),
+    (ui("Hedef puanı", "Target score"), f"{target.get('overall_score',0):.2f}/10", None),
+    (ui("Kategori lideri", "Category leader"), leader.get("name", unknown), f"{leader.get('overall_score',0):.2f}/10"),
+    (ui("Doğrulanmış bulgu", "Verified findings"), verified, f"{len(data.get('sources',[]))} {ui('kaynak', 'sources')}"),
+    (ui("Kanıt güveni", "Evidence confidence"), f"{confidence.get('score', 0)}/100", confidence.get("level", ui("Düşük", "Low"))),
 ], strict=False):
     column.metric(label, value, delta)
 st.caption(
     "Kanıt güveni model tahmini değildir. "
-    + confidence.get("explanation", "Mevcut kanıt paketinden hesaplanır.")
+    + confidence.get("explanation", ui("Mevcut kanıt paketinden hesaplanır.", "Based on the current evidence package."))
 )
 
 usage = data.get("_usage", {})
@@ -1085,89 +1201,116 @@ if usage.get("provider") == "Gemini" and usage.get("token_cost_usd") is not None
     if paid_search_total > free_total:
         st.caption(f"Search ücretsiz kotası aşılmışsa: ${paid_search_total:.4f}")
 
-overview, evidence, chat = st.tabs(["Genel bakış", "Kanıtlar ve kaynaklar", "BenchMind'a Sor"])
+overview, evidence, chat = st.tabs([
+    ui("Genel bakış", "Overview"),
+    ui("Kanıtlar ve kaynaklar", "Evidence and Sources"),
+    ui("BenchMind'a Sor", "Ask BenchMind"),
+])
 with overview:
-    st.markdown('<div class="section-kicker">YÖNETİCİ ÖZETİ</div>', unsafe_allow_html=True)
-    st.subheader(f"Pazar {data.get('target_company','hedef şirket')} hakkında ne söylüyor?")
-    st.write(data.get("executive_summary", "Yönetici özeti bulunmuyor."))
+    st.markdown(f'<div class="section-kicker">{ui("YÖNETİCİ ÖZETİ", "EXECUTIVE SUMMARY")}</div>', unsafe_allow_html=True)
+    subject = data.get("target_company", ui("hedef şirket", "the target company"))
+    st.subheader(ui(f"Pazar {subject} hakkında ne söylüyor?", f"What does the market say about {subject}?"))
+    st.write(data.get("executive_summary", ui("Yönetici özeti bulunmuyor.", "No executive summary is available.")))
     render_conflicts(data)
-    st.markdown("### Benchmark tablosu")
+    st.markdown(ui("### Benchmark tablosu", "### Benchmark table"))
     render_benchmark_table(data)
     for company_index, company in enumerate(companies):
         color_index = company_index % 4
         with st.container(key=f"profile_company_{color_index}"):
-            with st.expander(f"{company.get('name')} — ürün profili"):
+            with st.expander(f"{company.get('name')} — {ui('ürün profili', 'product profile')}"):
                 col1, col2 = st.columns([1.35,1])
-                pricing = html.escape(str(company.get("pricing", "Bulunamadı")))
-                free_plan = html.escape(str(company.get("free_plan", "Bulunamadı")))
-                target_customer = html.escape(str(company.get("target_customer", "Bulunamadı")))
+                pricing = html.escape(str(company.get("pricing", ui("Bulunamadı", "Unavailable"))))
+                free_plan = html.escape(str(company.get("free_plan", ui("Bulunamadı", "Unavailable"))))
+                target_customer = html.escape(str(company.get("target_customer", ui("Bulunamadı", "Unavailable"))))
                 col1.markdown(
                     f"""<div class="profile-details">
-                    <div class="profile-detail"><span class="profile-label profile-pricing">Fiyatlandırma</span><p>{pricing}</p></div>
-                    <div class="profile-detail"><span class="profile-label profile-free">Ücretsiz plan</span><p>{free_plan}</p></div>
-                    <div class="profile-detail"><span class="profile-label profile-customer">Hedef müşteri</span><p>{target_customer}</p></div>
+                    <div class="profile-detail"><span class="profile-label profile-pricing">{ui('Fiyatlandırma', 'Pricing')}</span><p>{pricing}</p></div>
+                    <div class="profile-detail"><span class="profile-label profile-free">{ui('Ücretsiz plan', 'Free plan')}</span><p>{free_plan}</p></div>
+                    <div class="profile-detail"><span class="profile-label profile-customer">{ui('Hedef müşteri', 'Target customer')}</span><p>{target_customer}</p></div>
                     </div>""",
                     unsafe_allow_html=True,
                 )
                 col2.success(
-                    f"**Güçlü yön**\n\n{company.get('key_strength', 'Güçlü yön kaydedilmemiş.')}"
+                    f"**{ui('Güçlü yön', 'Key strength')}**\n\n{company.get('key_strength', ui('Güçlü yön kaydedilmemiş.', 'No strength recorded.'))}"
                 )
                 col2.warning(
-                    f"**Sınırlamalar**\n\n{company.get('key_limitation', 'Sınırlama kaydedilmemiş.')}"
+                    f"**{ui('Sınırlamalar', 'Limitations')}**\n\n{company.get('key_limitation', ui('Sınırlama kaydedilmemiş.', 'No limitation recorded.'))}"
                 )
     st.markdown("### Competitive scorecard")
     chart1, chart2 = st.columns(2)
     with chart1:
-        st.caption("Kategori profili")
+        st.caption(ui("Kategori profili", "Category profile"))
         render_radar(data)
     with chart2:
-        st.caption("Ağırlıklı genel puan")
+        st.caption(ui("Ağırlıklı genel puan", "Weighted overall score"))
         render_bar(data)
-    st.caption("Puanlar kanıtlardan türetilen analitik değerlendirmelerdir; doğrulanmış ürün bilgileri değildir.")
-    st.markdown("### SWOT analizi")
+    st.caption(ui("Puanlar kanıtlardan türetilen analitik değerlendirmelerdir; doğrulanmış ürün bilgileri değildir.", "Scores are analytical assessments based on evidence."))
+    st.markdown(ui("### SWOT analizi", "### SWOT analysis"))
     render_swot(data)
-    st.markdown("### Stratejik öneriler")
+    st.markdown(ui("### Stratejik öneriler", "### Strategic recommendations"))
     render_recommendations(data)
-    st.download_button("Benchmark CSV'yi İndir", export_csv(data),
+    csv_columns = {
+        "Araştırma tarihi": "Research date", "Şirket": "Company", "Genel puan": "Overall score",
+        "Fiyatlandırma": "Pricing", "Ücretsiz plan": "Free plan",
+        "Hedef müşteri": "Target customer", "Temel güçlü yön": "Key strength",
+        "Temel sınırlama": "Key limitation",
+        **score_labels(),
+    } if st.session_state.ui_language == "en" else None
+    st.download_button(ui("Benchmark CSV'yi İndir", "Download Benchmark CSV"), export_csv(data, csv_columns),
                        f"benchmind_{data.get('target_company','benchmark').lower().replace(' ','_')}.csv", "text/csv")
 
 with evidence:
     st.markdown('<div class="section-kicker">AUDIT TRAIL</div>', unsafe_allow_html=True)
-    st.subheader("Benchmark'ın arkasındaki kanıtları inceleyin")
+    st.subheader(ui("Benchmark'ın arkasındaki kanıtları inceleyin", "Review the evidence behind the benchmark"))
     finding_frame = findings_dataframe(data)
+    if st.session_state.ui_language == "en" and not finding_frame.empty:
+        evidence_types = {
+            "Doğrulanmış bilgi (Verified fact)": "Verified fact",
+            "Müşteri görüşü (Customer opinion)": "Customer opinion",
+            "AI çıkarımı (AI inference)": "AI inference",
+        }
+        finding_frame["Kanıt türü"] = finding_frame["Kanıt türü"].replace(evidence_types)
     filter1, filter2 = st.columns(2)
     company_values = ["Tümü"] + sorted(finding_frame["Şirket"].unique()) if not finding_frame.empty else ["Tümü"]
     type_values = ["Tümü"] + sorted(finding_frame["Kanıt türü"].unique()) if not finding_frame.empty else ["Tümü"]
-    company_filter = filter1.selectbox("Şirket", company_values)
-    type_filter = filter2.selectbox("Kanıt türü", type_values)
+    all_label = ui("Tümü", "All")
+    company_filter = filter1.selectbox(
+        ui("Şirket", "Company"), company_values, key="evidence_company_filter",
+        format_func=lambda value: all_label if value == "Tümü" else value,
+    )
+    type_filter = filter2.selectbox(
+        ui("Kanıt türü", "Evidence type"), type_values, key="evidence_type_filter",
+        format_func=lambda value: all_label if value == "Tümü" else value,
+    )
     filtered = finding_frame
     if company_filter != "Tümü": filtered = filtered[filtered["Şirket"] == company_filter]
     if type_filter != "Tümü": filtered = filtered[filtered["Kanıt türü"] == type_filter]
     render_evidence_table(filtered, data)
-    st.markdown("### Kaynak listesi")
-    sources = pd.DataFrame(data.get("sources", [])).rename(columns={"id":"ID","title":"Başlık","publisher":"Yayıncı","source_type":"Tür","url":"URL"})
+    st.markdown(ui("### Kaynak listesi", "### Sources"))
+    sources = pd.DataFrame(data.get("sources", [])).rename(columns={"id":"ID","title":ui("Başlık", "Title"),"publisher":ui("Yayıncı", "Publisher"),"source_type":ui("Tür", "Type"),"url":"URL"})
     if sources.empty:
-        st.info("Bu araştırma için kayıtlı kaynak bulunmuyor.")
+        st.info(ui("Bu araştırma için kayıtlı kaynak bulunmuyor.", "No sources were saved for this research."))
     else:
-        st.dataframe(sources[["ID","Başlık","Yayıncı","Tür","URL"]], width="stretch", hide_index=True,
-                     column_config={"URL":st.column_config.LinkColumn("Kaynağı aç",display_text="Aç")})
+        st.dataframe(sources[["ID",ui("Başlık", "Title"),ui("Yayıncı", "Publisher"),ui("Tür", "Type"),"URL"]], width="stretch", hide_index=True,
+                     column_config={"URL":st.column_config.LinkColumn(ui("Kaynağı aç", "Open source"),display_text=ui("Aç", "Open"))})
     if data.get("conflicts"):
-        st.markdown("### Çelişkili kanıtlar")
+        st.markdown(ui("### Çelişkili kanıtlar", "### Conflicting evidence"))
         render_conflicts(data)
 
 with chat:
-    st.markdown('<div class="section-kicker">KAYNAĞA DAYALI Q&A</div>', unsafe_allow_html=True)
-    st.subheader("Mevcut kanıt paketine sorun")
-    st.caption("BenchMind chat sırasında web'de arama yapmaz. Yüklenen kanıtlardan yanıt verir veya yeterli kanıt olmadığını bildirir.")
-    target_name = data.get("target_company", "hedef şirket")
-    suggestions = [f"{target_name} en belirgin competitive advantage'a hangi alanda sahip?",
-                   "Hangi rakibin multilingual yaklaşımı en güçlü?",
-                   "Hedef ürün ekibi bir sonraki adımda neye öncelik vermeli?"]
+    st.markdown(f'<div class="section-kicker">{ui("KAYNAĞA DAYALI Q&A", "EVIDENCE-BASED Q&A")}</div>', unsafe_allow_html=True)
+    st.subheader(ui("Mevcut kanıt paketine sorun", "Ask a question about the current evidence"))
+    st.caption(ui("BenchMind chat sırasında web'de arama yapmaz. Yüklenen kanıtlardan yanıt verir veya yeterli kanıt olmadığını bildirir.", "BenchMind answers from the loaded evidence and tells you if the evidence is insufficient."))
+    target_name = data.get("target_company", ui("hedef şirket", "the target company"))
+    suggestions = [ui(f"{target_name} en belirgin competitive advantage'a hangi alanda sahip?",
+                      f"Where does {target_name} have the clearest competitive advantage?"),
+                   ui("Hangi rakibin multilingual yaklaşımı en güçlü?", "Which competitor has the strongest multilingual offering?"),
+                   ui("Hedef ürün ekibi bir sonraki adımda neye öncelik vermeli?", "What should the target product team prioritize next?")]
     for column, question in zip(st.columns(3), suggestions, strict=False):
         with column:
             if st.button(question, key=f"suggest_{question}", width="stretch"):
                 st.session_state.pending_question = question
-    for message in st.session_state.chat_history:
+    for message in displayed_chat:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             if message.get("retrieved_sources"):
@@ -1178,8 +1321,10 @@ with chat:
                             f"- [{source.get('source_id', 'Kaynak')}] "
                             f"[{title}]({source.get('url', '')}) · similarity: {source.get('similarity', '—')}"
                         )
-    typed = st.chat_input("Mevcut benchmark hakkında bir soru sorun")
+    typed = st.chat_input(ui("Mevcut benchmark hakkında bir soru sorun", "Ask a question about the current benchmark"), key="benchmark_question")
     active_question = typed or st.session_state.pop("pending_question", None)
     if active_question:
-        ask(active_question, data, api_key, model_name, provider)
+        ask(active_question, original_data, api_key, model_name, provider)
+        if st.session_state.ui_language == "en":
+            st.rerun()
         st.rerun()

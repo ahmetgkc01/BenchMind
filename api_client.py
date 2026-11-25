@@ -61,6 +61,10 @@ def get_benchmark_job(job_id: str) -> dict[str, Any]:
     return _request("GET", f"/v1/benchmarks/{job_id}")
 
 
+def translate_backend(texts: list[str], model: str) -> list[str]:
+    return _request("POST", "/v1/translations", json={"texts": texts, "model": model})["translations"]
+
+
 def ask_backend(
     question: str,
     research: dict[str, Any],

@@ -121,11 +121,42 @@ class BenchmarkDataTests(unittest.TestCase):
 
         app.text_input(key="name_0").set_value("Amazon")
         app.text_input(key="url_0").set_value("https://amazon.com.tr").run(timeout=30)
-        app.button[0].click().run(timeout=30)
+        app.button(key="load_demo").click().run(timeout=30)
 
         self.assertFalse(app.exception)
         self.assertEqual(app.text_input(key="name_0").value, "Fathom")
         self.assertEqual(app.text_input(key="url_0").value, "https://www.fathom.ai/")
+
+    def test_english_switch_translates_results_and_keeps_original_research(self):
+        with (
+            patch.dict(os.environ, {"BENCHMIND_API_URL": ""}),
+            patch("openai_service.get_api_config", return_value=("OpenAI", "test-key")),
+            patch("openai_service.translate_english", side_effect=lambda texts, *_: [
+                "English result" for _ in texts
+            ]) as translate,
+        ):
+            app = AppTest.from_file("app.py").run(timeout=30)
+            app.button(key="load_demo").click().run(timeout=30)
+            original = deepcopy(app.session_state["research"])
+            app.button(key="language_en").click().run(timeout=30)
+            self.assertFalse(app.exception)
+            self.assertEqual(app.tabs[0].label, "Overview")
+            rendered = "\n".join(str(item.value) for item in app.markdown)
+            for company in original["companies"]:
+                self.assertNotIn(company["pricing"], rendered)
+                self.assertNotIn(company["key_strength"], rendered)
+            for item in original["recommendations"] + original["swot"]["strengths"]:
+                self.assertNotIn(item["statement"], rendered)
+            self.assertNotIn("English result", rendered)
+            self.assertNotIn("English translation unavailable.", rendered)
+            summary = app.session_state["english_translations"][original["executive_summary"]]
+            self.assertIn(summary, rendered)
+            translate.assert_not_called()
+            self.assertEqual(app.session_state["research"], original)
+            calls = translate.call_count
+            app.button(key="language_tr").click().run(timeout=30)
+            app.button(key="language_en").click().run(timeout=30)
+            self.assertEqual(translate.call_count, calls)
 
     def test_product_profiles_have_labels_and_live_research_button_is_not_translated(self):
         app = AppTest.from_file("app.py").run(timeout=30)

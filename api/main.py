@@ -19,6 +19,7 @@ from openai_service import (
     default_model_for_provider,
     get_api_config,
     research_companies,
+    translate_english,
 )
 from rag_service import (
     INSUFFICIENT_RETRIEVAL_MESSAGE,
@@ -48,6 +49,11 @@ class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=1200)
     research: dict[str, Any]
     collection_name: str = Field(default="", max_length=120)
+    model: str | None = Field(default=None, max_length=120)
+
+
+class TranslationRequest(BaseModel):
+    texts: list[str] = Field(min_length=1, max_length=30)
     model: str | None = Field(default=None, max_length=120)
 
 
@@ -227,6 +233,21 @@ def get_benchmark(job_id: str) -> dict[str, Any]:
         if job is None:
             raise HTTPException(status_code=404, detail="Benchmark job not found.")
         return dict(job)
+
+
+@app.post("/v1/translations", dependencies=[Depends(_authenticate)])
+def translate(request: TranslationRequest) -> dict[str, Any]:
+    if sum(map(len, request.texts)) > 30000:
+        raise HTTPException(413, "The translation request is too large.")
+    provider, key = get_api_config()
+    if not provider or not key:
+        raise HTTPException(503, "Configure a model provider to translate results.")
+    try:
+        return {"translations": translate_english(
+            request.texts, key, request.model or default_model_for_provider(provider), provider
+        )}
+    except Exception as exc:
+        raise HTTPException(502, "The translation provider could not complete the request.") from exc
 
 
 @app.post("/v1/chat", dependencies=[Depends(_authenticate)], tags=["chat"])
